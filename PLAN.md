@@ -26,7 +26,7 @@ Centralt innehåll kommer som HTML: `<h4>` rubrik + `<li>` punkter, per årskurs
 |---|---|---|
 | 0 ✔ | Hämta ämne, visa centralt innehåll, bocka av punkter (`index.html`) | Fungerar lokalt |
 | 1 ✔ | **Planering:** moment med veckointervall kopplade till punkter, täckning och luckor, flera klasser (7A/7B), kopiera plan, export/import som JSON-fil | Lärare kan lägga en hel termin och se luckor. Klart, men inte provat av riktig lärare ännu |
-| 2 | **Rättning/bedömning:** uppgifter och prov kopplade till punkter, snabb inmatning av resultat per elev, översikt per elev och klass | Resultat per elev och punkt utan dubbelarbete |
+| 2 ✔ (första version) | **Rättning/bedömning:** uppgifter och prov (namn, maxpoäng) kopplade till punkter, resultatrutnät med Enter-navigering, översikt per elev och rubrik i procent | Resultat per elev och punkt utan dubbelarbete. Byggt på antaganden, ej provat av lärare |
 | 3 | **Omdömen/betyg:** underlag från fas 2, utkast utan elevnamn, sammanställning att föra över till skolans system | Omdömesunderlag på minuter |
 | 4 | **Anpassningar:** per elev och moment, återanvändbara | Anpassningar syns i planeringen |
 | 5 | **Gold standard:** design, tillgänglighet, test, export/import, driftsättning (statisk sida) | Redo för riktiga användare |
@@ -41,6 +41,13 @@ Fas 1 och 2 prioriteras (planering och rättning tar mest tid). Efter intervjun 
 - [ ] Hur går resultat från rättning in? Manuellt per elev, klistra in från kalkylblad, eller något annat?
 - [ ] Integritet: vad kräver skolor om vi senare lagrar elevdata centralt?
 - [ ] Hosting: statisk sida (t.ex. GitHub Pages) tills delning behövs.
+
+## Antaganden i fas 2 (verifiera i intervjun)
+- Elever läggs in som namnlista per plan, lokalt. Kopiera plan tar med uppgifterna som mallar men inte elever eller resultat.
+- Resultat är poäng av maxpoäng per uppgift. Ingen delpoäng per fråga, ingen betygsnivå (A–F) och ingen koppling per bedömningskriterium.
+- Översikten visar procent per rubrik (medelvärde över punkter, som själva är medelvärde över de uppgifter som bedömer dem). Färggränserna 50 % och 75 % är godtyckliga. Inget betyg föreslås.
+- Resultat matas in manuellt. Inklistring från kalkylblad och import från andra system finns inte.
+- Exportfilen innehåller nu elevnamn och resultat och är personuppgifter.
 
 ## Kvar från fas 1
 - `prompt`/`confirm` (kopiera plan, ta bort) ska bytas mot riktiga dialoger i designfasen.

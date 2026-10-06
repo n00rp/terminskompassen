@@ -46,6 +46,19 @@
   dialog { border: 1px solid var(--line); border-radius: .6rem; padding: 1.25rem; max-width: 26rem; width: calc(100% - 2rem); }
   dialog form { display: grid; gap: .75rem; }
   dialog label.field > * { width: 100%; }
+  .tabs { margin-bottom: 1rem; }
+  button.tab[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .note { color: var(--muted); font-size: .9rem; }
+  textarea { width: 100%; padding: .5rem; border: 1px solid var(--line); border-radius: .4rem; font: inherit; margin-bottom: .5rem; }
+  ul.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .75rem; }
+  ul.chips li { margin: 0; padding: .1rem .2rem .1rem .6rem; border: 1px solid var(--line); border-radius: 1rem; }
+  ul.chips button { border: 0; background: none; padding: 0 .4rem; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .4rem .6rem; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th { border-top: 0; font-size: .85rem; color: var(--muted); }
+  th.wide { min-width: 9rem; max-width: 12rem; }
+  td input[type=number] { width: 6rem; }
   .sr { position: absolute; left: -9999px; }
 </style>
 </head>
@@ -152,8 +165,13 @@ function coverage() {
 const level = (n, t) => n === 0 ? ["none", "Saknas"] : n < t ? ["part", "Delvis"] : ["full", "Täckt"];
 
 // ---- Rendering ----
+let view = "plan";       // "plan" | "assess"
+let curA = null;         // vald bedömning
+let pendingFocus = null; // sätts när fokus flyttas medan en ändring sparas
+
 function render() {
-  const focusId = document.activeElement?.dataset?.f;
+  const focusId = pendingFocus ?? document.activeElement?.dataset?.f;
+  pendingFocus = null;
   renderToolbar();
   const app = $("app"), p = plan();
   app.replaceChildren();
@@ -165,10 +183,12 @@ function render() {
   } else if (!data) {
     app.append(h("p", {}, "Hämtar läroplanen…"));
   } else {
-    const c = coverage();
-    app.append(coverageCard(c), momentsCard(p, c));
+    const tab = (id, label) => h("button", { class: "tab", "aria-pressed": view === id, onclick: () => { view = id; render(); } }, label);
+    app.append(h("nav", { class: "bar tabs", "aria-label": "Vy" }, tab("plan", "Planering"), tab("assess", "Bedömning")));
+    if (view === "plan") { const c = coverage(); app.append(coverageCard(c), momentsCard(p, c)); }
+    else app.append(studentsCard(p), assessmentsCard(p), overviewCard(p));
   }
-  if (focusId) document.querySelector(`[data-f="${focusId}"]`)?.focus();
+  if (focusId) document.querySelector(`[data-f="${CSS.escape(focusId)}"]`)?.focus();
 }
 
 function renderToolbar() {
@@ -237,6 +257,16 @@ function addMomentForm(p) {
     h("button", { type: "submit", class: "primary" }, "Lägg till moment"));
 }
 
+// Gruppvis lista med kryssrutor över läroplanens punkter. Används av moment och bedömningar.
+function checklist(selected, onToggle, prefix) {
+  const box = h("div");
+  data.groups.forEach(g => box.append(h("h3", {}, g.title), h("ul", { class: "plain" }, g.items.map(it =>
+    h("li", {}, h("label", {},
+      h("input", { type: "checkbox", checked: selected.includes(it.key), "data-f": prefix + it.key, onchange: e => onToggle(it.key, e.target.checked) }),
+      h("span", {}, it.text)))))));
+  return box;
+}
+
 function momentView(p, m) {
   const valid = new Set(data.groups.flatMap(g => g.items.map(i => i.key)));
   const n = m.items.filter(k => valid.has(k)).length;
@@ -249,15 +279,10 @@ function momentView(p, m) {
   };
   const det = h("details", { open: open.has(m.id), ontoggle: e => e.target.open ? open.add(m.id) : open.delete(m.id) },
     h("summary", {}, `Innehåll (${n} valda)`));
-  data.groups.forEach(g => {
-    det.append(h("h3", {}, g.title), h("ul", { class: "plain" }, g.items.map(it =>
-      h("li", {}, h("label", {},
-        h("input", { type: "checkbox", checked: m.items.includes(it.key), "data-f": m.id + it.key, onchange: e => {
-          m.items = e.target.checked ? [...m.items, it.key] : m.items.filter(k => k !== it.key);
-          save(); render();
-        } }),
-        h("span", {}, it.text))))));
-  });
+  det.append(checklist(m.items, (k, on) => {
+    m.items = on ? [...m.items, k] : m.items.filter(x => x !== k);
+    save(); render();
+  }, m.id));
   return h("div", { class: "moment" },
     h("div", { class: "bar" },
       h("label", { class: "field" }, h("span", {}, "Moment"), h("input", { type: "text", value: m.name, maxlength: 80, "data-f": m.id + "n", onchange: edit("name", s => s.trim()) })),
@@ -268,6 +293,134 @@ function momentView(p, m) {
         p.moments = p.moments.filter(x => x !== m); save(); render();
       } }, "Ta bort")),
     det);
+}
+
+// ---- Bedömning (fas 2) ----
+const MAX_STUDENTS = 500;
+const pctClass = v => v == null ? "" : v < 50 ? "none" : v < 75 ? "part" : "full"; // ponytail: fasta gränser, gör justerbara om lärare vill det
+const collator = new Intl.Collator("sv");
+
+function studentsCard(p) {
+  const ta = h("textarea", { rows: 4, placeholder: "Ett namn per rad", "aria-label": "Elevnamn, ett per rad", "data-f": "studs" });
+  const det = h("details", { open: !p.students.length || open.has("students"), ontoggle: e => e.target.open ? open.add("students") : open.delete("students") },
+    h("summary", {}, `Elever (${p.students.length})`),
+    h("p", { class: "note" }, "Elevnamn sparas bara i den här webbläsaren och i exportfilen. Behandla exportfilen som personuppgifter."),
+    h("form", { onsubmit: e => {
+      e.preventDefault();
+      const have = new Set(p.students.map(s => s.name));
+      for (const raw of ta.value.split("\n")) {
+        const name = raw.trim().slice(0, 100);
+        if (name && !have.has(name) && p.students.length < MAX_STUDENTS) { have.add(name); p.students.push({ id: uid(), name }); }
+      }
+      p.students.sort((a, b) => collator.compare(a.name, b.name));
+      save(); open.add("students"); render();
+    } }, ta, h("div", {}, h("button", { type: "submit", class: "primary" }, "Lägg till elever"))),
+    h("ul", { class: "plain chips" }, p.students.map(s => h("li", {}, s.name + " ",
+      h("button", { class: "danger", "aria-label": "Ta bort " + s.name, onclick: () => {
+        if (!confirm(`Ta bort ${s.name} och alla resultat för eleven?`)) return;
+        p.students = p.students.filter(x => x !== s);
+        p.assessments.forEach(a => delete a.results[s.id]);
+        save(); render();
+      } }, "×")))));
+  return h("section", { class: "card" }, det);
+}
+
+function assessmentsCard(p) {
+  const card = h("section", { class: "card", "aria-labelledby": "asT" }, h("h2", { id: "asT" }, "Uppgifter och prov"));
+  const name = h("input", { type: "text", required: true, maxlength: 80, placeholder: "t.ex. Prov antiken", "data-f": "aName" });
+  const max = h("input", { type: "number", min: 1, max: 1000, step: "any", required: true, value: 20 });
+  card.append(h("form", { class: "bar", onsubmit: e => {
+    e.preventDefault();
+    const a = { id: uid(), name: name.value.trim(), max: +max.value, items: [], results: {} };
+    p.assessments.push(a); curA = a.id; save(); render();
+  } },
+    h("label", { class: "field" }, h("span", {}, "Namn"), name),
+    h("label", { class: "field" }, h("span", {}, "Maxpoäng"), max),
+    h("button", { type: "submit", class: "primary" }, "Lägg till")));
+  if (!p.assessments.length) return (card.append(h("p", { class: "empty" }, "Lägg till ett prov eller en uppgift för att börja föra in resultat.")), card);
+  const a = p.assessments.find(x => x.id === curA) ?? p.assessments[0];
+  curA = a.id;
+  card.append(h("label", { class: "field" }, h("span", {}, "Välj uppgift"),
+    h("select", { "data-f": "aSel", onchange: e => { curA = e.target.value; render(); } },
+      p.assessments.map(x => h("option", { value: x.id, selected: x.id === a.id }, x.name)))));
+  const valid = new Set(data.groups.flatMap(g => g.items.map(i => i.key)));
+  const nLinked = a.items.filter(k => valid.has(k)).length;
+  card.append(h("div", { class: "moment" },
+    h("div", { class: "bar" },
+      h("label", { class: "field" }, h("span", {}, "Namn"), h("input", { type: "text", value: a.name, maxlength: 80, "data-f": a.id + "n",
+        onchange: e => { const v = e.target.value.trim(); if (!v) { e.target.value = a.name; return; } a.name = v; save(); render(); } })),
+      h("label", { class: "field" }, h("span", {}, "Maxpoäng"), h("input", { type: "number", min: 1, max: 1000, step: "any", value: a.max, "data-f": a.id + "m",
+        onchange: e => {
+          const v = +e.target.value;
+          if (!(v > 0 && v <= 1000) || Object.values(a.results).some(r => r > v)) { showError("Maxpoängen kan inte vara lägre än något redan inmatat resultat."); e.target.value = a.max; return; }
+          showError(""); a.max = v; save(); render();
+        } })),
+      h("button", { class: "danger", onclick: () => {
+        if (!confirm(`Ta bort "${a.name}" och alla resultat?`)) return;
+        p.assessments = p.assessments.filter(x => x !== a); curA = null; save(); render();
+      } }, "Ta bort")),
+    h("details", { open: open.has("a" + a.id), ontoggle: e => e.target.open ? open.add("a" + a.id) : open.delete("a" + a.id) },
+      h("summary", {}, `Innehåll som bedöms (${nLinked} valda)`),
+      checklist(a.items, (k, on) => { a.items = on ? [...a.items, k] : a.items.filter(x => x !== k); save(); render(); }, a.id))));
+  card.append(resultsTable(p, a));
+  return card;
+}
+
+function resultsTable(p, a) {
+  if (!p.students.length) return h("p", { class: "empty" }, "Lägg till elever ovan för att föra in resultat.");
+  const filled = p.students.filter(s => a.results[s.id] != null).length;
+  const inputs = [];
+  const rows = p.students.map((s, i) => {
+    const v = a.results[s.id];
+    const input = h("input", { type: "number", min: 0, max: a.max, step: "any", value: v ?? "", "aria-label": `Poäng för ${s.name}`, "data-f": a.id + s.id,
+      onchange: e => {
+        const raw = e.target.value.trim(), n = +raw;
+        if (raw === "") delete a.results[s.id];
+        else if (!(n >= 0 && n <= a.max)) { showError(`Poängen måste vara mellan 0 och ${a.max}.`); e.target.value = v ?? ""; return; }
+        else a.results[s.id] = n;
+        showError(""); save(); render();
+      },
+      onkeydown: e => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const next = inputs[i + (e.shiftKey ? -1 : 1)];
+        if (next) { pendingFocus = next.dataset.f; next.focus(); next.select(); } else e.target.blur();
+      } });
+    inputs.push(input);
+    const pct = v == null ? null : Math.round(100 * v / a.max);
+    return h("tr", {}, h("th", { scope: "row" }, s.name), h("td", {}, input), h("td", {}, h("span", { class: "badge " + pctClass(pct) }, pct == null ? "–" : pct + " %")));
+  });
+  return h("div", {},
+    h("p", { role: "status" }, `${filled} av ${p.students.length} resultat inmatade. Tryck Enter för att gå till nästa elev.`),
+    h("div", { class: "scroll" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Elev"), h("th", { scope: "col" }, `Poäng (max ${a.max})`), h("th", { scope: "col" }, "Andel"))),
+      h("tbody", {}, rows))));
+}
+
+// Procent per elev och rubrik: för varje punkt medelvärdet av de uppgifter som bedömer den, därefter medelvärde över punkterna.
+function overviewCard(p) {
+  const card = h("section", { class: "card", "aria-labelledby": "ovT" }, h("h2", { id: "ovT" }, "Översikt per elev"));
+  const linked = p.assessments.filter(a => a.items.length);
+  if (!p.students.length || !linked.length) return (card.append(h("p", { class: "empty" }, "Översikten visas när du har elever och minst en uppgift som är kopplad till innehåll.")), card);
+  const byKey = {};
+  for (const a of linked) for (const k of a.items) (byKey[k] ??= []).push(a);
+  const mean = xs => xs.reduce((s, x) => s + x, 0) / xs.length;
+  const cell = (s, g) => {
+    const per = g.items.flatMap(it => {
+      const v = (byKey[it.key] ?? []).filter(a => a.results[s.id] != null).map(a => a.results[s.id] / a.max);
+      return v.length ? [mean(v)] : [];
+    });
+    return per.length ? { n: per.length, pct: Math.round(100 * mean(per)) } : null;
+  };
+  card.append(
+    h("p", { class: "note" }, "Procent av möjliga poäng på de uppgifter som bedömer rubrikens punkter. Det är inget betyg. Färger: under 50 %, 50–74 %, 75 % eller mer. \"–\" betyder att inget är bedömt ännu."),
+    h("div", { class: "scroll" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Elev"), data.groups.map(g => h("th", { scope: "col", class: "wide" }, g.title)))),
+      h("tbody", {}, p.students.map(s => h("tr", {}, h("th", { scope: "row" }, s.name), data.groups.map(g => {
+        const c = cell(s, g);
+        return h("td", {}, c ? h("span", { class: "badge " + pctClass(c.pct), title: `${c.n} av ${g.items.length} punkter bedömda` }, `${c.pct} % (${c.n}/${g.items.length})`) : "–");
+      })))))));
+  return card;
 }
 
 // ---- Planer ----
@@ -290,7 +443,7 @@ $("nSubject").onchange = () => fillSpans().catch(e => showError("Kunde inte häm
 $("nCancel").onclick = () => dlg.close();
 $("newForm").onsubmit = () => {
   const sel = $("nSubject");
-  const p = { id: uid(), name: $("nName").value.trim(), subject: sel.value, subjectName: sel.selectedOptions[0].text, span: $("nSpan").value, moments: [] };
+  const p = { id: uid(), name: $("nName").value.trim(), subject: sel.value, subjectName: sel.selectedOptions[0].text, span: $("nSpan").value, moments: [], students: [], assessments: [] };
   S.plans.push(p); S.active = p.id; save(); loadData();
 };
 
@@ -300,6 +453,9 @@ function copyPlan() {
   if (!name?.trim()) return;
   const c = { ...structuredClone(p), id: uid(), name: name.trim() };
   c.moments.forEach(m => m.id = uid());
+  // Uppgifterna följer med som mallar; elever och resultat tillhör den ursprungliga klassen.
+  c.students = [];
+  c.assessments.forEach(a => { a.id = uid(); a.results = {}; });
   S.plans.push(c); S.active = c.id; save(); loadData();
 }
 function deletePlan() {
@@ -326,7 +482,21 @@ function validPlan(p) {
     if (!m || !isStr(m.name, 80) || !isWeek(m.from) || !isWeek(m.to) || m.to < m.from || !Array.isArray(m.items) || !m.items.every(k => isStr(k, 1000))) return null;
     moments.push({ id: uid(), name: m.name, from: m.from, to: m.to, items: [...new Set(m.items)] });
   }
-  return { id: uid(), name: p.name, subject: p.subject, subjectName: p.subjectName, span: p.span, moments };
+  // Elever och bedömningar är nya i fas 2; äldre filer saknar dem.
+  const students = [], map = {};
+  for (const s of p.students ?? []) {
+    if (!s || !isStr(s.id, 100) || !isStr(s.name, 100) || students.length >= MAX_STUDENTS) return null;
+    map[s.id] = uid(); students.push({ id: map[s.id], name: s.name });
+  }
+  const assessments = [];
+  for (const a of p.assessments ?? []) {
+    if (!a || !isStr(a.name, 80) || !(a.max > 0 && a.max <= 1000) || !Array.isArray(a.items) || !a.items.every(k => isStr(k, 1000)) || assessments.length >= 200) return null;
+    const results = {};
+    for (const [sid, v] of Object.entries(a.results ?? {}))
+      if (map[sid] && Number.isFinite(v) && v >= 0 && v <= a.max) results[map[sid]] = v;
+    assessments.push({ id: uid(), name: a.name, max: a.max, items: [...new Set(a.items)], results });
+  }
+  return { id: uid(), name: p.name, subject: p.subject, subjectName: p.subjectName, span: p.span, moments, students, assessments };
 }
 
 $("importFile").onchange = async e => {
@@ -348,6 +518,7 @@ $("importFile").onchange = async e => {
   }
 };
 
+S.plans.forEach(p => { p.students ??= []; p.assessments ??= []; }); // planer sparade före fas 2
 if (!S.plans.some(p => p.id === S.active)) S.active = S.plans[0]?.id ?? null;
 loadData();
 </script>
