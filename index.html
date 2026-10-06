@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminskompassen</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1c2430; --muted: #5b6675; --line: #d9dee5;
+    --accent: #1f5fbf; --accent-text: #fff;
+    --none: #b42318; --none-bg: #fdecea; --part: #8a5a00; --part-bg: #fff4d6; --full: #146c2e; --full-bg: #e3f5e8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 1rem; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
+  h3 { font-size: 1rem; margin: 1rem 0 .25rem; }
+  header.top { display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+  .bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: .6rem; padding: 1rem; margin-bottom: 1rem; }
+  button, select, input { font: inherit; }
+  button { padding: .45rem .8rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--card); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--none); }
+  select, input[type=text], input[type=number] { padding: .4rem .5rem; border: 1px solid var(--line); border-radius: .4rem; background: #fff; color: var(--text); }
+  input[type=number] { width: 5rem; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  label.field { display: inline-flex; flex-direction: column; gap: .15rem; font-size: .85rem; color: var(--muted); }
+  label.field > :not(span) { font-size: 1rem; color: var(--text); }
+  progress { width: 100%; height: .9rem; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: .25rem .75rem; align-items: center; padding: .5rem 0; border-top: 1px solid var(--line); }
+  .badge { font-size: .8rem; font-weight: 600; padding: .1rem .5rem; border-radius: 1rem; white-space: nowrap; }
+  .none { color: var(--none); background: var(--none-bg); }
+  .part { color: var(--part); background: var(--part-bg); }
+  .full { color: var(--full); background: var(--full-bg); }
+  details > summary { cursor: pointer; color: var(--muted); }
+  ul.plain { list-style: none; padding: 0; margin: .25rem 0; }
+  ul.plain li { margin: .35rem 0; }
+  ul.plain label { display: flex; gap: .6rem; cursor: pointer; }
+  .moment { border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; margin-top: .75rem; }
+  .moment .bar { align-items: flex-end; }
+  .warn { color: var(--part); background: var(--part-bg); padding: .5rem .75rem; border-radius: .4rem; margin: .5rem 0; }
+  .error { color: var(--none); background: var(--none-bg); padding: .5rem .75rem; border-radius: .4rem; margin: .5rem 0; }
+  .empty { text-align: center; padding: 2.5rem 1rem; color: var(--muted); }
+  dialog { border: 1px solid var(--line); border-radius: .6rem; padding: 1.25rem; max-width: 26rem; width: calc(100% - 2rem); }
+  dialog form { display: grid; gap: .75rem; }
+  dialog label.field > * { width: 100%; }
+  .sr { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Terminskompassen</h1>
+    <div class="bar" id="toolbar"></div>
+  </header>
+  <p id="status" class="sr" role="status"></p>
+  <div id="error" role="alert"></div>
+  <main id="app"></main>
+  <input type="file" id="importFile" accept=".json,application/json" hidden>
+</div>
+
+<dialog id="newDlg" aria-labelledby="newTitle">
+  <form method="dialog" id="newForm">
+    <h2 id="newTitle">Ny plan</h2>
+    <label class="field"><span>Klass eller grupp</span><input type="text" id="nName" placeholder="t.ex. 7A" required maxlength="40"></label>
+    <label class="field"><span>Ämne</span><select id="nSubject"></select></label>
+    <label class="field"><span>Årskurs</span><select id="nSpan"></select></label>
+    <div class="bar"><button type="submit" class="primary">Skapa</button><button type="button" id="nCancel">Avbryt</button></div>
+  </form>
+</dialog>
+
+<script>
+const API = "https://api.skolverket.se/syllabus/v1";
+const KEY = "terminskompassen.v1";
+const $ = id => document.getElementById(id);
+
+// ---- DOM-hjälpare. Text läggs alltid som textnod, aldrig som HTML. ----
+const h = (tag, props = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on") || k in e) e[k] = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  e.append(...kids.flat().filter(k => k != null && k !== false));
+  return e;
+};
+
+// ---- Tillstånd (sparas i localStorage) ----
+let S = (() => { try { return JSON.parse(localStorage[KEY]); } catch { return null; } })() || { plans: [], active: null };
+const save = () => { try { localStorage[KEY] = JSON.stringify(S); } catch { showError("Kunde inte spara i webbläsaren."); } };
+const plan = () => S.plans.find(p => p.id === S.active);
+const uid = () => crypto.randomUUID();
+const open = new Set();          // moment-id vars innehållslista är öppen
+let data = null;                 // { groups } för aktiv plan
+let subjectList = null;
+const cache = {};                // ämneskod -> ämne
+
+function showError(msg) { $("error").replaceChildren(msg ? h("p", { class: "error" }, msg) : ""); }
+function say(msg) { $("status").textContent = msg; }
+
+// ---- Skolverket ----
+const get = path => fetch(API + path, { headers: { Accept: "application/json" } })
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+const getSubject = async code => cache[code] ??= (await get("/subjects/" + code)).subject;
+const getSubjects = async () => subjectList ??= (await get("/subjects?schooltype=GR")).subjects;
+
+// Centralt innehåll är HTML: <h4> rubrik följt av <ul><li> punkter.
+function parse(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const groups = [];
+  for (const el of doc.body.children) {
+    if (el.tagName === "H4") groups.push({ title: clean(el.textContent), items: [] });
+    else if (el.tagName === "UL" && groups.length)
+      for (const li of el.querySelectorAll("li")) groups.at(-1).items.push({ text: clean(li.textContent) });
+  }
+  return groups.filter(g => g.items.length);
+}
+const clean = s => s.replace(/­/g, "").replace(/\s+/g, " ").trim();
+
+// Nyckel för en innehållspunkt. Texten ingår så att ändrad text i läroplanen inte ger fel koppling.
+const keyOf = (p, gi, ii, text) => [p.subject, p.span, gi, ii, text].join("|");
+
+async function loadData() {
+  const p = plan();
+  data = null;
+  if (!p) return render();
+  try {
+    const subj = await getSubject(p.subject);
+    const cc = subj.centralContents.find(c => c.year === p.span);
+    if (!cc) throw new Error("årskurs " + p.span + " saknas");
+    const groups = parse(cc.text);
+    groups.forEach((g, gi) => g.items.forEach((it, ii) => it.key = keyOf(p, gi, ii, it.text)));
+    data = { groups };
+    showError("");
+  } catch (e) { showError("Kunde inte hämta läroplanen från Skolverket (" + e.message + "). Kontrollera nätverket och ladda om."); }
+  render();
+}
+
+// ---- Beräkningar ----
+function coverage() {
+  const p = plan(), covered = new Set(p.moments.flatMap(m => m.items));
+  const all = new Set(data.groups.flatMap(g => g.items.map(i => i.key)));
+  const rows = data.groups.map(g => ({ g, n: g.items.filter(i => covered.has(i.key)).length }));
+  const done = rows.reduce((a, r) => a + r.n, 0), total = all.size;
+  const orphans = p.moments.reduce((a, m) => a + m.items.filter(k => !all.has(k)).length, 0);
+  return { rows, covered, done, total, orphans };
+}
+const level = (n, t) => n === 0 ? ["none", "Saknas"] : n < t ? ["part", "Delvis"] : ["full", "Täckt"];
+
+// ---- Rendering ----
+function render() {
+  const focusId = document.activeElement?.dataset?.f;
+  renderToolbar();
+  const app = $("app"), p = plan();
+  app.replaceChildren();
+  if (!p) {
+    app.append(h("div", { class: "card empty" },
+      h("h2", {}, "Börja med en plan"),
+      h("p", {}, "En plan hör till en klass, ett ämne och en årskurs. Centralt innehåll hämtas från Skolverket."),
+      h("button", { class: "primary", onclick: openNew }, "Skapa din första plan")));
+  } else if (!data) {
+    app.append(h("p", {}, "Hämtar läroplanen…"));
+  } else {
+    const c = coverage();
+    app.append(coverageCard(c), momentsCard(p, c));
+  }
+  if (focusId) document.querySelector(`[data-f="${focusId}"]`)?.focus();
+}
+
+function renderToolbar() {
+  const tb = $("toolbar"), p = plan();
+  tb.replaceChildren();
+  if (S.plans.length) {
+    const sel = h("select", { "aria-label": "Välj plan", onchange: e => { S.active = e.target.value; save(); loadData(); } },
+      S.plans.map(x => h("option", { value: x.id, selected: x.id === S.active }, `${x.name} – ${x.subjectName}, åk ${x.span}`)));
+    tb.append(sel);
+  }
+  tb.append(h("button", { class: "primary", onclick: openNew }, "Ny plan"));
+  if (p) tb.append(
+    h("button", { onclick: copyPlan }, "Kopiera"),
+    h("button", { class: "danger", onclick: deletePlan }, "Ta bort"));
+  tb.append(
+    h("button", { onclick: exportPlans, disabled: !S.plans.length }, "Exportera"),
+    h("button", { onclick: () => $("importFile").click() }, "Importera"));
+}
+
+function coverageCard(c) {
+  const pct = c.total ? Math.round(100 * c.done / c.total) : 0;
+  const card = h("section", { class: "card", "aria-labelledby": "covT" },
+    h("h2", { id: "covT" }, "Täckning av centralt innehåll"),
+    h("progress", { max: c.total || 1, value: c.done, "aria-label": "Täckning" }),
+    h("p", {}, `${c.done} av ${c.total} punkter ingår i något moment (${pct} %).`));
+  if (c.orphans) card.append(h("p", { class: "warn" },
+    `${c.orphans} koppling(ar) matchar inte längre läroplanens nuvarande text. Skolverket kan ha ändrat innehållet.`));
+  for (const { g, n } of c.rows) {
+    const [cls, label] = level(n, g.items.length);
+    const missing = g.items.filter(i => !c.covered.has(i.key));
+    card.append(h("div", { class: "row" },
+      h("div", {}, h("strong", {}, g.title),
+        missing.length ? h("details", {}, h("summary", {}, `Visa ${missing.length} saknade`),
+          h("ul", { class: "plain" }, missing.map(i => h("li", {}, i.text)))) : null),
+      h("span", { class: "badge " + cls }, `${label} ${n}/${g.items.length}`)));
+  }
+  return card;
+}
+
+function momentsCard(p, c) {
+  const card = h("section", { class: "card", "aria-labelledby": "momT" }, h("h2", { id: "momT" }, "Moment"));
+  card.append(addMomentForm(p));
+  const sorted = [...p.moments].sort((a, b) => a.from - b.from || a.to - b.to);
+  if (!sorted.length) card.append(h("p", { class: "empty" }, "Inga moment ännu. Lägg till det första ovan."));
+  for (const m of sorted) card.append(momentView(p, m));
+  return card;
+}
+
+function addMomentForm(p) {
+  const last = p.moments.reduce((a, m) => Math.max(a, m.to), 0);
+  const name = h("input", { type: "text", required: true, maxlength: 80, "data-f": "addName", placeholder: "t.ex. Antiken" });
+  const from = h("input", { type: "number", min: 1, max: 53, required: true, value: last ? Math.min(last + 1, 53) : "" });
+  const to = h("input", { type: "number", min: 1, max: 53, required: true, value: last ? Math.min(last + 5, 53) : "" });
+  return h("form", { class: "bar", onsubmit: e => {
+    e.preventDefault();
+    const f = +from.value, t = +to.value;
+    if (t < f) { showError("Slutvecka kan inte ligga före startvecka."); return; }
+    showError("");
+    const m = { id: uid(), name: name.value.trim(), from: f, to: t, items: [] };
+    p.moments.push(m); open.add(m.id); save(); render();
+    say(`Moment ${m.name} tillagt`);
+  } },
+    h("label", { class: "field" }, h("span", {}, "Momentnamn"), name),
+    h("label", { class: "field" }, h("span", {}, "Från vecka"), from),
+    h("label", { class: "field" }, h("span", {}, "Till vecka"), to),
+    h("button", { type: "submit", class: "primary" }, "Lägg till moment"));
+}
+
+function momentView(p, m) {
+  const valid = new Set(data.groups.flatMap(g => g.items.map(i => i.key)));
+  const n = m.items.filter(k => valid.has(k)).length;
+  const edit = (field, parse) => e => {
+    const v = parse(e.target.value);
+    if (!v || (field !== "name" && (v < 1 || v > 53))) { e.target.value = m[field]; return; }
+    const next = { ...m, [field]: v };
+    if (next.to < next.from) { showError("Slutvecka kan inte ligga före startvecka."); e.target.value = m[field]; return; }
+    showError(""); m[field] = v; save(); render();
+  };
+  const det = h("details", { open: open.has(m.id), ontoggle: e => e.target.open ? open.add(m.id) : open.delete(m.id) },
+    h("summary", {}, `Innehåll (${n} valda)`));
+  data.groups.forEach(g => {
+    det.append(h("h3", {}, g.title), h("ul", { class: "plain" }, g.items.map(it =>
+      h("li", {}, h("label", {},
+        h("input", { type: "checkbox", checked: m.items.includes(it.key), "data-f": m.id + it.key, onchange: e => {
+          m.items = e.target.checked ? [...m.items, it.key] : m.items.filter(k => k !== it.key);
+          save(); render();
+        } }),
+        h("span", {}, it.text))))));
+  });
+  return h("div", { class: "moment" },
+    h("div", { class: "bar" },
+      h("label", { class: "field" }, h("span", {}, "Moment"), h("input", { type: "text", value: m.name, maxlength: 80, "data-f": m.id + "n", onchange: edit("name", s => s.trim()) })),
+      h("label", { class: "field" }, h("span", {}, "Från vecka"), h("input", { type: "number", min: 1, max: 53, value: m.from, "data-f": m.id + "f", onchange: edit("from", Number) })),
+      h("label", { class: "field" }, h("span", {}, "Till vecka"), h("input", { type: "number", min: 1, max: 53, value: m.to, "data-f": m.id + "t", onchange: edit("to", Number) })),
+      h("button", { class: "danger", onclick: () => {
+        if (!confirm(`Ta bort momentet "${m.name}"?`)) return;
+        p.moments = p.moments.filter(x => x !== m); save(); render();
+      } }, "Ta bort")),
+    det);
+}
+
+// ---- Planer ----
+const dlg = $("newDlg");
+async function openNew() {
+  $("nName").value = "";
+  try {
+    const subs = await getSubjects();
+    $("nSubject").replaceChildren(...subs.map(s => new Option(s.name, s.code)));
+    $("nSubject").value = "GRGRHIS01";
+    await fillSpans();
+    dlg.showModal(); $("nName").focus();
+  } catch (e) { showError("Kunde inte hämta ämnena från Skolverket (" + e.message + ")."); }
+}
+async function fillSpans() {
+  const s = await getSubject($("nSubject").value);
+  $("nSpan").replaceChildren(...s.centralContents.map(c => new Option("Årskurs " + c.year, c.year)));
+}
+$("nSubject").onchange = () => fillSpans().catch(e => showError("Kunde inte hämta ämnet (" + e.message + ")."));
+$("nCancel").onclick = () => dlg.close();
+$("newForm").onsubmit = () => {
+  const sel = $("nSubject");
+  const p = { id: uid(), name: $("nName").value.trim(), subject: sel.value, subjectName: sel.selectedOptions[0].text, span: $("nSpan").value, moments: [] };
+  S.plans.push(p); S.active = p.id; save(); loadData();
+};
+
+function copyPlan() {
+  const p = plan();
+  const name = prompt("Namn på den nya klassen eller gruppen:", "");
+  if (!name?.trim()) return;
+  const c = { ...structuredClone(p), id: uid(), name: name.trim() };
+  c.moments.forEach(m => m.id = uid());
+  S.plans.push(c); S.active = c.id; save(); loadData();
+}
+function deletePlan() {
+  const p = plan();
+  if (!confirm(`Ta bort planen "${p.name}" och alla dess moment? Det går inte att ångra.`)) return;
+  S.plans = S.plans.filter(x => x !== p); S.active = S.plans[0]?.id ?? null; save(); loadData();
+}
+
+// ---- Export / import ----
+function exportPlans() {
+  const blob = new Blob([JSON.stringify({ app: "terminskompassen", version: 1, plans: S.plans }, null, 2)], { type: "application/json" });
+  const a = h("a", { href: URL.createObjectURL(blob), download: `terminskompassen-${new Date().toISOString().slice(0, 10)}.json` });
+  a.click(); URL.revokeObjectURL(a.href);
+  say("Planer exporterade");
+}
+
+// Bygger om varje plan från kända fält, så att en trasig eller manipulerad fil inte kan skada appen.
+const isStr = (v, max = 200) => typeof v === "string" && v.length > 0 && v.length <= max;
+const isWeek = v => Number.isInteger(v) && v >= 1 && v <= 53;
+function validPlan(p) {
+  if (!p || !isStr(p.name, 40) || !/^GR[A-Z0-9]+$/.test(p.subject) || !isStr(p.subjectName) || !/^\d-\d$/.test(p.span) || !Array.isArray(p.moments)) return null;
+  const moments = [];
+  for (const m of p.moments) {
+    if (!m || !isStr(m.name, 80) || !isWeek(m.from) || !isWeek(m.to) || m.to < m.from || !Array.isArray(m.items) || !m.items.every(k => isStr(k, 1000))) return null;
+    moments.push({ id: uid(), name: m.name, from: m.from, to: m.to, items: [...new Set(m.items)] });
+  }
+  return { id: uid(), name: p.name, subject: p.subject, subjectName: p.subjectName, span: p.span, moments };
+}
+
+$("importFile").onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    if (file.size > 5e6) throw new Error("filen är för stor");
+    const j = JSON.parse(await file.text());
+    if (j?.app !== "terminskompassen" || j.version !== 1 || !Array.isArray(j.plans)) throw new Error("det är ingen Terminskompassen-fil");
+    const plans = j.plans.map(validPlan);
+    if (plans.includes(null)) throw new Error("filen innehåller ogiltiga planer");
+    if (!plans.length) throw new Error("filen innehåller inga planer");
+    S.plans.push(...plans); S.active = plans[0].id; save(); showError(""); loadData();
+    say(`${plans.length} plan(er) importerade`);
+  } catch (err) {
+    const why = err instanceof SyntaxError ? "filen är inte en giltig exportfil" : err.message;
+    showError("Kunde inte importera: " + why + ". Inget har ändrats.");
+  }
+};
+
+if (!S.plans.some(p => p.id === S.active)) S.active = S.plans[0]?.id ?? null;
+loadData();
+</script>
+</body>
+</html>
